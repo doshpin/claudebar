@@ -1,0 +1,33 @@
+{
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          { "type": "command", "command": "$HOME/.claude/hooks/notify.sh 'Needs attention' 'Funk'", "async": true },
+          { "type": "command", "command": "$HOME/.claude/hooks/update-state.sh Notification", "async": true }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "$HOME/.claude/hooks/notify.sh 'Turn complete' 'Glass'", "async": true },
+          { "type": "command", "command": "$HOME/.claude/hooks/update-state.sh Stop", "async": true }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "$HOME/.claude/hooks/update-state.sh UserPromptSubmit", "async": true } ] }
+    ],
+    "PreToolUse": [
+      { "hooks": [ { "type": "command", "command": "$HOME/.claude/hooks/update-state.sh PreToolUse", "async": true } ] }
+    ],
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "$HOME/.claude/hooks/update-state.sh SessionStart", "async": true } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "$HOME/.claude/hooks/update-state.sh SessionEnd", "async": true } ] }
+    ]
+  }
+}

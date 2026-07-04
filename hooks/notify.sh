@@ -39,11 +39,18 @@ title="${title//\"/}"
 
 message="${1:-Event}"
 sound="${2:-Glass}"
+# User-picked override from the SwiftBar dropdown's Settings > Sound menu.
+sound_pref="$HOME/.claude/state/claudebar-sound"
+[ -s "$sound_pref" ] && sound=$(cat "$sound_pref")
 message_safe="${message//\"/}"
 
 click_cmd="/bin/bash $HOME/.claude/hooks/focus-agent.sh $session_id"
 
 if command -v terminal-notifier >/dev/null 2>&1; then
+  # ponytail: -sender and -appIcon both no-op on modern macOS — terminal-
+  # notifier 2.0.0 uses the deprecated NSUserNotification API, which Apple
+  # (Big Sur+) stopped honoring custom icons for on unsigned CLI tools.
+  # No known fix short of a signed app bundle; not worth chasing further.
   terminal-notifier -title "$title" -message "$message_safe" -sound "$sound" \
     -execute "$click_cmd" >/dev/null 2>&1
 else

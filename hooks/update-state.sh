@@ -43,6 +43,13 @@ fi
 [ -z "$title" ] && [ -n "$cwd" ] && title=$(basename "$cwd")
 [ -z "$title" ] && title="Claude Code"
 
+# bg = spawned as a background/forked session (Agent tool, fork-to-background),
+# fg = a normal foreground terminal session.
+kind="fg"
+if [ -f "$transcript_path" ] && grep -qm1 '"sessionKind":"bg"' "$transcript_path" 2>/dev/null; then
+  kind="bg"
+fi
+
 case "$event" in
   UserPromptSubmit)  status="working" ;;
   Stop)              status="idle" ;;
@@ -105,6 +112,7 @@ jq -n \
   --arg tmux_sess "$tmux_sess" \
   --arg tmux_win_id "$tmux_win_id" \
   --arg tmux_pane_id "$tmux_pane_id" \
+  --arg kind "$kind" \
   '{
     session_id: $session_id,
     cwd: $cwd,
@@ -117,7 +125,8 @@ jq -n \
     tmux_socket: $tmux_socket,
     tmux_sess: $tmux_sess,
     tmux_win_id: $tmux_win_id,
-    tmux_pane_id: $tmux_pane_id
+    tmux_pane_id: $tmux_pane_id,
+    kind: $kind
   }' > "$tmp" && mv "$tmp" "$state_file"
 
 # Nudge SwiftBar to refresh now (on top of its 30s polling).

@@ -9,6 +9,8 @@
 # or a daemon-managed spawn, don't get a specific tab id through at all.
 # No-op (exits cleanly) if we have neither.
 
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
 session_id="$1"
 [ -z "$session_id" ] && exit 1
 
@@ -36,6 +38,14 @@ if [ -z "$iterm_session_id" ] && [ -n "$cwd" ]; then
   candidates=""
   count=0
   for pid in $(pgrep -x "claude"; pgrep -f "claude/versions.*--"); do
+    pid_cmd=$(ps -o command= -p "$pid" 2>/dev/null)
+    # Skip forks/backgrounded conversations (--resume) and the bg-pty-host
+    # plumbing process — neither is "the real terminal to jump to", and a
+    # fork shares its parent's cwd, so it'd otherwise falsely count as a
+    # second candidate for the SAME directory as the real session.
+    case "$pid_cmd" in
+      *--resume*|*--bg-pty-host*) continue ;;
+    esac
     p_cwd=$(lsof -p "$pid" 2>/dev/null | awk '$4=="cwd"{print $NF}')
     if [ "$p_cwd" = "$cwd" ]; then
       candidates="$pid"

@@ -43,8 +43,8 @@ for e in "${entries[@]}"; do
   esac
 done
 
-# Pre-tinted Claude icons (red/yellow/green), generated once from the tray
-# icon's transparent silhouette — the bundled app icon has a solid
+# Pre-tinted Claude icons (red/yellow/green/orange), generated once from
+# the tray icon's transparent silhouette — the bundled app icon has a solid
 # background so it can't be tinted, only this template asset can.
 tint_dir="$HOME/.claude/state/claudebar-icons"
 if [ ! -f "$tint_dir/claude-green.png" ]; then
@@ -52,10 +52,11 @@ if [ ! -f "$tint_dir/claude-green.png" ]; then
 fi
 b64() { [ -f "$1" ] && base64 -i "$1" | tr -d '\n'; }
 
-# Menu bar title — dominant-status tinted Claude icon (empty state: neutral
-# robot) plus the total session count.
+# Menu bar title — dominant-status tinted Claude icon plus the total
+# session count. Empty state: plain orange Claude icon, no count.
 if [ ${#entries[@]} -eq 0 ]; then
-  echo "🤖"
+  b64_dom=$(b64 "$tint_dir/claude-orange.png")
+  [ -n "$b64_dom" ] && echo " | image=$b64_dom" || echo "🤖"
 else
   if [ "$attn" -gt 0 ]; then dominant="$tint_dir/claude-red.png"
   elif [ "$work" -gt 0 ]; then dominant="$tint_dir/claude-yellow.png"

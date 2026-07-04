@@ -1,9 +1,9 @@
 #!/bin/bash
-# claudebar — pre-generates red/yellow/green tinted copies of Claude's tray
-# icon (the only bundled asset with real transparency — the app icon has a
-# solid background, so tinting it just paints a solid square). Uses Cocoa
-# directly via JXA (native, no ImageMagick/PIL dependency). Run once; caller
-# skips regenerating if the files already exist.
+# claudebar — pre-generates tinted copies (red/yellow/green/orange) of
+# Claude's tray icon (the only bundled asset with real transparency — the
+# app icon has a solid background, so tinting it just paints a solid
+# square). Uses Cocoa directly via JXA (native, no ImageMagick/PIL
+# dependency). Run once; caller skips regenerating if the files exist.
 
 set -e
 out_dir="$1"
@@ -43,4 +43,5 @@ const outDir = ObjC.unwrap(args.objectAtIndex(5));
 tint(src, outDir + '/claude-red.png',    0.906, 0.298, 0.235);
 tint(src, outDir + '/claude-yellow.png', 0.945, 0.769, 0.059);
 tint(src, outDir + '/claude-green.png',  0.180, 0.800, 0.443);
+tint(src, outDir + '/claude-orange.png', 0.851, 0.467, 0.341);
 EOF

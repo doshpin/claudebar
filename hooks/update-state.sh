@@ -72,6 +72,7 @@ esac
 # Capture the terminal location so the dashboard/notification can jump to it.
 # Only valid because the hook runs inside the session's own process.
 wezterm_pane="${WEZTERM_PANE:-}"
+iterm_session_id="${ITERM_SESSION_ID:-}"
 tmux_socket=""
 tmux_sess=""
 tmux_win_id=""
@@ -89,7 +90,8 @@ fi
 
 # Preserve previously captured pane info when this event lacks it.
 if [ -f "$state_file" ]; then
-  [ -z "$wezterm_pane" ]  && wezterm_pane=$(jq -r  '.wezterm_pane  // ""' "$state_file" 2>/dev/null)
+  [ -z "$wezterm_pane" ]     && wezterm_pane=$(jq -r     '.wezterm_pane     // ""' "$state_file" 2>/dev/null)
+  [ -z "$iterm_session_id" ] && iterm_session_id=$(jq -r '.iterm_session_id // ""' "$state_file" 2>/dev/null)
   [ -z "$tmux_socket" ]   && tmux_socket=$(jq -r   '.tmux_socket   // ""' "$state_file" 2>/dev/null)
   [ -z "$tmux_sess" ]     && tmux_sess=$(jq -r     '.tmux_sess     // ""' "$state_file" 2>/dev/null)
   [ -z "$tmux_win_id" ]   && tmux_win_id=$(jq -r   '.tmux_win_id   // ""' "$state_file" 2>/dev/null)
@@ -108,6 +110,7 @@ jq -n \
   --arg event "$event" \
   --argjson ts "$ts" \
   --arg wezterm_pane "$wezterm_pane" \
+  --arg iterm_session_id "$iterm_session_id" \
   --arg tmux_socket "$tmux_socket" \
   --arg tmux_sess "$tmux_sess" \
   --arg tmux_win_id "$tmux_win_id" \
@@ -122,6 +125,7 @@ jq -n \
     last_event: $event,
     last_event_ts: $ts,
     wezterm_pane: $wezterm_pane,
+    iterm_session_id: $iterm_session_id,
     tmux_socket: $tmux_socket,
     tmux_sess: $tmux_sess,
     tmux_win_id: $tmux_win_id,

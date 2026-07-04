@@ -1,9 +1,9 @@
 #!/bin/bash
-# claudebar — focus the WezTerm tab + tmux pane for a given session.
+# claudebar — focus the terminal tab/pane for a given session.
 # Usage: focus-agent.sh <session_id>
 #
-# No-op (exits cleanly) if the session isn't running under WezTerm + tmux, so
-# it's safe to wire up regardless of your terminal.
+# Supports WezTerm+tmux and iTerm2. No-op (exits cleanly) for anything else,
+# so it's safe to wire up regardless of your terminal.
 
 session_id="$1"
 [ -z "$session_id" ] && exit 1
@@ -12,6 +12,7 @@ state_file="$HOME/.claude/state/agents/$session_id.json"
 [ -f "$state_file" ] || exit 1
 
 wezterm_pane=$(jq -r '.wezterm_pane // ""' "$state_file")
+iterm_session_id=$(jq -r '.iterm_session_id // ""' "$state_file")
 tmux_socket=$(jq  -r '.tmux_socket  // ""' "$state_file")
 tmux_sess=$(jq    -r '.tmux_sess    // ""' "$state_file")
 tmux_win_id=$(jq  -r '.tmux_win_id  // ""' "$state_file")
@@ -19,6 +20,26 @@ tmux_pane_id=$(jq -r '.tmux_pane_id // ""' "$state_file")
 
 WEZTERM_BIN=$(command -v wezterm)
 TMUX_BIN=$(command -v tmux)
+
+if [ -n "$iterm_session_id" ]; then
+  /usr/bin/osascript << EOF 2>/dev/null
+    tell application "iTerm2"
+      activate
+      repeat with w in windows
+        repeat with t in tabs of w
+          repeat with s in sessions of t
+            if id of s is "$iterm_session_id" then
+              select t
+              select s
+              set index of w to 1
+            end if
+          end repeat
+        end repeat
+      end repeat
+    end tell
+EOF
+  exit 0
+fi
 
 /usr/bin/osascript -e 'tell application "WezTerm" to activate' 2>/dev/null
 

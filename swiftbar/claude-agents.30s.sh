@@ -136,6 +136,9 @@ else
   fi
   # ● (a plain text bullet, colored via ANSI) instead of the 🔴🟡🟢 emoji —
   # renders at normal text size instead of the emoji's fixed larger size.
+  # It sits slightly above the digit baseline at menu-bar font size (how
+  # solid-circle glyphs are drawn) — same trade-off as Slack/Discord-style
+  # status dots next to text; U+2022 BULLET sits lower but reads too small.
   parts=()
   [ "$attn" -gt 0 ] && parts+=("$(ansi_bold 91 "●") $(ansi_bold 91 "$attn")")
   [ "$work" -gt 0 ] && parts+=("$(ansi_bold 93 "●") $(ansi_bold 93 "$work")")

@@ -16,7 +16,7 @@ command -v jq >/dev/null 2>&1 || { echo "error: jq is required (brew install jq)
 
 echo "==> Installing hook scripts to $hooks_dir"
 mkdir -p "$hooks_dir"
-for f in notify.sh update-state.sh focus-agent.sh dismiss-agent.sh; do
+for f in notify.sh update-state.sh focus-agent.sh dismiss-agent.sh capture-statusline.sh; do
   install -m 0755 "$repo_dir/hooks/$f" "$hooks_dir/$f"
 done
 

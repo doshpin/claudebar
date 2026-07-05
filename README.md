@@ -95,6 +95,27 @@ hook runs, so no configuration is needed — it only lights up if those are pres
 Want it for your terminal? `hooks/focus-agent.sh` is ~40 lines and the one place
 to adapt. PRs welcome.
 
+## Model / context / cost detail
+
+Each session's row can expand into the same numbers your terminal's
+statusLine already shows: model, effort, context % (with token counts),
+cost, elapsed time, and lines changed. Repo/branch is always shown (read
+straight from the session's `cwd`), no setup required.
+
+The rest needs one line added to your own `statusLine` script, right after
+it reads stdin, so claudebar sees the same numbers your terminal does:
+
+```sh
+input=$(cat)
+printf '%s' "$input" | "$HOME/.claude/hooks/capture-statusline.sh" &
+```
+
+That's it — no further config. It's a no-op for sessions claudebar isn't
+tracking, and for anyone who hasn't wired it up, those lines just don't
+appear. There's no cost estimate without this: reproducing Claude Code's
+own cache-aware pricing from a transcript alone isn't worth it — this reads
+the number Claude Code itself already computed.
+
 ## Configuration
 
 It's shell scripts — edit them directly.
@@ -117,6 +138,7 @@ hooks/
   update-state.sh    writes per-session state JSON (drives the menu)
   focus-agent.sh     jump to a session's WezTerm tab + tmux pane
   dismiss-agent.sh   remove a session from the dashboard
+  capture-statusline.sh   optional: model/cost/context detail from your statusline
 swiftbar/
   claude-agents.30s.sh   the menu-bar plugin
 settings.hooks.json  the hooks block merged into ~/.claude/settings.json

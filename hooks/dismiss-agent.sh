@@ -1,17 +1,19 @@
 #!/bin/bash
-# claudebar — remove a session from the dashboard.
+# claudebar — hide a live session from the dashboard until it ends.
 # Usage:
-#   dismiss-agent.sh <session_id>   — delete one session's state file
-#   dismiss-agent.sh --all          — delete every tracked session
+#   dismiss-agent.sh <session_id>   — hide one session
+#   dismiss-agent.sh --all         — hide every currently listed session
 
-state_dir="$HOME/.claude/state/agents"
+dismissed_file="$HOME/.claude/state/claudebar-dismissed"
+touch "$dismissed_file"
 
 case "$1" in
   --all)
-    rm -f "$state_dir"/*.json
+    claude agents --json --all 2>/dev/null | jq -r '.[].sessionId' > "$dismissed_file"
     ;;
   ?*)
-    rm -f "$state_dir/$1.json"
+    echo "$1" >> "$dismissed_file"
+    sort -u -o "$dismissed_file" "$dismissed_file"
     ;;
   *)
     exit 1

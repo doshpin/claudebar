@@ -15,52 +15,36 @@ session_id="$1"
 [ -z "$session_id" ] && exit 1
 
 state_file="$HOME/.claude/state/agents/$session_id.json"
-[ -f "$state_file" ] || exit 1
 
-wezterm_pane=$(jq -r '.wezterm_pane // ""' "$state_file")
-iterm_session_id=$(jq -r '.iterm_session_id // ""' "$state_file")
-term_bundle_id=$(jq -r '.term_bundle_id // ""' "$state_file")
-tmux_socket=$(jq  -r '.tmux_socket  // ""' "$state_file")
-tmux_sess=$(jq    -r '.tmux_sess    // ""' "$state_file")
-tmux_win_id=$(jq  -r '.tmux_win_id  // ""' "$state_file")
-tmux_pane_id=$(jq -r '.tmux_pane_id // ""' "$state_file")
-cwd=$(jq -r '.cwd // ""' "$state_file")
-
-# Hook-time capture of $ITERM_SESSION_ID is unreliable in practice (the var
-# demonstrably exists in the live process's own environment, per `ps eww`,
-# even when the hook captured nothing — Claude Code's hook execution
-# doesn't appear to reliably pass it through). Fallback: at click time, find
-# this session's live process by matching cwd and read ITS env directly.
-# Only usable when exactly one candidate matches — if multiple sessions
-# share a project directory, there's no way to tell them apart, so skip
-# rather than jump to the wrong one.
-if [ -z "$iterm_session_id" ] && [ -n "$cwd" ]; then
-  candidates=""
-  count=0
-  for pid in $(pgrep -x "claude"; pgrep -f "claude/versions.*--"); do
-    pid_cmd=$(ps -o command= -p "$pid" 2>/dev/null)
-    # Skip forks/backgrounded conversations (--resume) and the bg-pty-host
-    # plumbing process — neither is "the real terminal to jump to", and a
-    # fork shares its parent's cwd, so it'd otherwise falsely count as a
-    # second candidate for the SAME directory as the real session.
-    case "$pid_cmd" in
-      *--resume*|*--bg-pty-host*) continue ;;
-    esac
-    p_cwd=$(lsof -p "$pid" 2>/dev/null | awk '$4=="cwd"{print $NF}')
-    if [ "$p_cwd" = "$cwd" ]; then
-      candidates="$pid"
-      count=$((count+1))
-    fi
-  done
-  if [ "$count" -eq 1 ]; then
-    env_iterm=$(ps eww "$candidates" 2>/dev/null | tr ' ' '\n' | grep '^ITERM_SESSION_ID=' | cut -d= -f2-)
-    [ -n "$env_iterm" ] && iterm_session_id="$env_iterm"
-    if [ -z "$term_bundle_id" ]; then
-      env_bundle=$(ps eww "$candidates" 2>/dev/null | tr ' ' '\n' | grep '^__CFBundleIdentifier=' | cut -d= -f2-)
-      [ -n "$env_bundle" ] && term_bundle_id="$env_bundle"
-    fi
-  fi
+wezterm_pane=""
+tmux_socket=""
+tmux_sess=""
+tmux_win_id=""
+tmux_pane_id=""
+cwd=""
+if [ -f "$state_file" ]; then
+  wezterm_pane=$(jq -r '.wezterm_pane // ""' "$state_file")
+  tmux_socket=$(jq  -r '.tmux_socket  // ""' "$state_file")
+  tmux_sess=$(jq    -r '.tmux_sess    // ""' "$state_file")
+  tmux_win_id=$(jq  -r '.tmux_win_id  // ""' "$state_file")
+  tmux_pane_id=$(jq -r '.tmux_pane_id // ""' "$state_file")
+  cwd=$(jq -r '.cwd // ""' "$state_file")
 fi
+
+# `claude agents --json` gives the exact pid for this session id directly —
+# no need to guess by matching cwd against every running claude process
+# (which was ambiguous whenever two sessions shared a directory, and had to
+# special-case forks/bg-pty-host to avoid false matches).
+pid=$(claude agents --json --all 2>/dev/null | jq -r --arg sid "$session_id" \
+  '.[] | select(.sessionId == $sid) | .pid' | head -1)
+
+iterm_session_id=""
+term_bundle_id=""
+if [ -n "$pid" ]; then
+  iterm_session_id=$(ps eww "$pid" 2>/dev/null | tr ' ' '\n' | grep '^ITERM_SESSION_ID=' | cut -d= -f2-)
+  term_bundle_id=$(ps eww "$pid" 2>/dev/null | tr ' ' '\n' | grep '^__CFBundleIdentifier=' | cut -d= -f2-)
+fi
+[ -z "$term_bundle_id" ] && [ -f "$state_file" ] && term_bundle_id=$(jq -r '.term_bundle_id // ""' "$state_file")
 
 WEZTERM_BIN=$(command -v wezterm)
 TMUX_BIN=$(command -v tmux)
@@ -114,6 +98,15 @@ fi
 # No precise target — activate the app in general rather than doing nothing.
 if [ -n "$term_bundle_id" ]; then
   /usr/bin/open -b "$term_bundle_id" 2>/dev/null
+  exit 0
 fi
+
+# Background/forked sessions are headless (no tty of their own — see the
+# comment above the pid lookup), so there's never a precise tab to jump to
+# for them. Their only interface is the Claude Code agent-view overlay,
+# which lives in iTerm2 — confirmed by ITERM_PROFILE showing up in their
+# env even with no ITERM_SESSION_ID/__CFBundleIdentifier. Best we can
+# honestly do is bring iTerm2 forward so you can open that overlay.
+/usr/bin/osascript -e 'tell application "iTerm2" to activate' 2>/dev/null
 
 exit 0

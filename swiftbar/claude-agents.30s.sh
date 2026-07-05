@@ -126,9 +126,14 @@ ansi_bold() {
 # here (not per-session) and shown both in the menu bar title and, more
 # fully, in the dropdown below. Only present once
 # hooks/capture-statusline.sh has been wired up (see its header comment).
+# Settings > 5h usage controls whether/how it's shown: full (with reset
+# countdown), compact (percent only), or hidden entirely.
+fiveh_display=$(cat "$HOME/.claude/state/claudebar-fiveh-display" 2>/dev/null)
+[ -z "$fiveh_display" ] && fiveh_display="full"
+
 fiveh_file="$HOME/.claude/state/claudebar-fiveh.json"
 fiveh_title="" fiveh_line=""
-if [ -f "$fiveh_file" ]; then
+if [ "$fiveh_display" != "hidden" ] && [ -f "$fiveh_file" ]; then
   fiveh_pct=$(jq -r '.used_percentage // empty' "$fiveh_file" 2>/dev/null)
   fiveh_resets=$(jq -r '.resets_at // empty' "$fiveh_file" 2>/dev/null)
   if [ -n "$fiveh_pct" ]; then
@@ -140,7 +145,7 @@ if [ -f "$fiveh_file" ]; then
     fi
     fiveh_pct_fmt="$(printf '%.0f' "$fiveh_pct")"
     fiveh_remain=""
-    if [ -n "$fiveh_resets" ]; then
+    if [ "$fiveh_display" = "full" ] && [ -n "$fiveh_resets" ]; then
       remain_min=$(( (${fiveh_resets%.*} - $(date +%s)) / 60 ))
       [ "$remain_min" -lt 0 ] && remain_min=0
       fiveh_remain=" (${remain_min}m)"
@@ -331,9 +336,17 @@ echo "---"
 echo "Settings"
 current_sound=$(cat "$HOME/.claude/state/claudebar-sound" 2>/dev/null)
 [ -z "$current_sound" ] && current_sound="Glass"
-echo "-- Sound | size=11 color=#888888"
+echo "-- Sound"
 for s in Basso Blow Bottle Frog Funk Glass Hero Morse Ping Pop Purr Sosumi Submarine Tink; do
   mark=""
   [ "$s" = "$current_sound" ] && mark="✓ "
-  echo "-- ${mark}${s} | bash='$HOME/.claude/hooks/set-sound.sh' param1='$s' terminal=false refresh=true"
+  echo "---- ${mark}${s} | bash='$HOME/.claude/hooks/set-sound.sh' param1='$s' terminal=false refresh=true"
+done
+echo "-- 5h usage"
+for mode_label in "full:With minutes" "compact:Percent only" "hidden:Hide completely"; do
+  mode="${mode_label%%:*}"
+  label="${mode_label#*:}"
+  mark=""
+  [ "$mode" = "$fiveh_display" ] && mark="✓ "
+  echo "---- ${mark}${label} | bash='$HOME/.claude/hooks/set-fiveh-display.sh' param1='$mode' terminal=false refresh=true"
 done

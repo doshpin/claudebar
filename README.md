@@ -116,6 +116,10 @@ appear. There's no cost estimate without this: reproducing Claude Code's
 own cache-aware pricing from a transcript alone isn't worth it — this reads
 the number Claude Code itself already computed.
 
+The account-wide 5-hour rate limit usage shows up once (menu bar + dropdown)
+rather than per session. Settings → 5h usage lets you switch it between
+showing the reset countdown, percent only, or hiding it entirely.
+
 ## Configuration
 
 It's shell scripts — edit them directly.

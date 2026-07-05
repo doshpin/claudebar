@@ -1,18 +1,26 @@
 #!/bin/bash
-# claudebar — hide a live session from the dashboard until it ends.
+# claudebar — hide a live session from the dashboard until it changes state.
 # Usage:
 #   dismiss-agent.sh <session_id>   — hide one session
 #   dismiss-agent.sh --all         — hide every currently listed session
+#   dismiss-agent.sh --restore     — un-hide everything
 
 dismissed_file="$HOME/.claude/state/claudebar-dismissed"
 touch "$dismissed_file"
 
 case "$1" in
+  --restore)
+    : > "$dismissed_file"
+    ;;
   --all)
-    claude agents --json --all 2>/dev/null | jq -r '.[].sessionId' > "$dismissed_file"
+    claude agents --json --all 2>/dev/null \
+      | jq -r '.[] | select(.kind=="background") | [.sessionId, (.state // "done")] | @tsv' \
+      > "$dismissed_file"
     ;;
   ?*)
-    echo "$1" >> "$dismissed_file"
+    state=$(claude agents --json --all 2>/dev/null | jq -r --arg sid "$1" \
+      '.[] | select(.sessionId==$sid) | (.state // "done")')
+    printf '%s\t%s\n' "$1" "$state" >> "$dismissed_file"
     sort -u -o "$dismissed_file" "$dismissed_file"
     ;;
   *)

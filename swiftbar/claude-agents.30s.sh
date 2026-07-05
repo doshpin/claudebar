@@ -23,13 +23,24 @@ touch "$dismissed_file"
 agents_json=$(claude agents --json --all 2>/dev/null | jq -c '[.[] | select(.kind=="background")]')
 [ -z "$agents_json" ] && agents_json="[]"
 
-is_dismissed() { grep -qxF "$1" "$dismissed_file" 2>/dev/null; }
+is_dismissed() { grep -qF "$(printf '%s\t' "$1")" "$dismissed_file" 2>/dev/null; }
 
-# Prune dismissed ids for sessions that no longer exist, so the file
-# doesn't grow forever (a dismissed id can never match a future session).
-live_sids=$(printf '%s' "$agents_json" | jq -r '.[].sessionId')
-comm -12 <(sort "$dismissed_file") <(printf '%s\n' "$live_sids" | sort) > "$dismissed_file.tmp" 2>/dev/null \
-  && mv "$dismissed_file.tmp" "$dismissed_file"
+# Dismissed entries store "sessionId<TAB>state" (the state at dismiss time).
+# Un-dismiss (drop from the file) any entry whose session is gone entirely,
+# or whose state has since changed — a state change means new activity, so
+# a session you hid shouldn't stay hidden forever just because you kept
+# using it under the same sessionId.
+# (No associative arrays here — macOS ships bash 3.2 as /bin/bash, which
+# doesn't have them; `declare -A` fails there. Grep against a tsv instead.)
+live_state_tsv=$(printf '%s' "$agents_json" | jq -r '.[] | [.sessionId, (.state // "done")] | @tsv')
+
+: > "$dismissed_file.tmp"
+while IFS=$'\t' read -r dsid dstate; do
+  [ -z "$dsid" ] && continue
+  printf '%s\n' "$live_state_tsv" | grep -qxF "$(printf '%s\t%s' "$dsid" "$dstate")" \
+    && printf '%s\t%s\n' "$dsid" "$dstate" >> "$dismissed_file.tmp"
+done < "$dismissed_file"
+mv "$dismissed_file.tmp" "$dismissed_file"
 
 # The API's own "state" field (working / blocked / done) is exactly the
 # same signal the desktop app groups by (Working / Needs input /
@@ -189,6 +200,8 @@ echo "---"
 echo "Refresh | refresh=true"
 echo "Open state dir | bash='/usr/bin/open' param1='$state_dir' terminal=false"
 [ ${#entries[@]} -gt 0 ] && echo "Clear all | color=#c0392b bash='$HOME/.claude/hooks/dismiss-agent.sh' param1='--all' terminal=false refresh=true"
+dismissed_count=$(wc -l < "$dismissed_file" | tr -d ' ')
+[ "$dismissed_count" -gt 0 ] && echo "Restore dismissed ($dismissed_count) | bash='$HOME/.claude/hooks/dismiss-agent.sh' param1='--restore' terminal=false refresh=true"
 
 echo "---"
 echo "Settings"

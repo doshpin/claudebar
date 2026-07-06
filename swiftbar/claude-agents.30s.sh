@@ -113,11 +113,33 @@ while IFS=$'\t' read -r sid name cwd pid state id kind; do
   # needs-attention our own hooks recorded for this session instead, so a
   # busy or input-waiting foreground pane isn't misfiled as Completed.
   if [ "$kind" = "interactive" ] && [ -f "$state_dir/$sid.json" ]; then
-    case "$(jq -r '.status // ""' "$state_dir/$sid.json" 2>/dev/null)" in
+    sf="$state_dir/$sid.json"
+    case "$(jq -r '.status // ""' "$sf" 2>/dev/null)" in
       needs-attention) status="needs-attention" ;;
       working)         status="working" ;;
       idle)            status="completed" ;;
     esac
+    # Stale-state override. The hook only records working/needs-attention on
+    # the events that fire; some interactions fire none that reset it — Esc
+    # interrupting a turn (no Stop), or answering an in-place question/
+    # permission (no UserPromptSubmit) — so the color sticks forever. The
+    # transcript is ground truth: if it was modified AFTER the last recorded
+    # event (newer mtime) and has since gone quiet, the session already moved
+    # on — show it idle instead of a stale yellow/red. Both conditions matter:
+    # "newer than state" keeps a genuinely-unanswered prompt red; "quiet"
+    # avoids flipping a live, mid-turn session green during a long tool call.
+    if [ "$status" = "working" ] || [ "$status" = "needs-attention" ]; then
+      tp=$(jq -r '.transcript_path // ""' "$sf" 2>/dev/null)
+      if [ -f "$tp" ]; then
+        s_m=$(stat -f %m "$sf" 2>/dev/null)
+        t_m=$(stat -f %m "$tp" 2>/dev/null)
+        now=$(date +%s)
+        if [ -n "$s_m" ] && [ -n "$t_m" ] \
+           && [ "$t_m" -gt "$s_m" ] && [ $((now - t_m)) -gt 60 ]; then
+          status="completed"
+        fi
+      fi
+    fi
   fi
   # A running sub-agent keeps its parent yellow, overriding an idle Stop.
   if printf '%s' "$active_parents" | grep -qxF "$sid"; then

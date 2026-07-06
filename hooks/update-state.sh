@@ -43,6 +43,32 @@ fi
 [ -z "$title" ] && [ -n "$cwd" ] && title=$(basename "$cwd")
 [ -z "$title" ] && title="Claude Code"
 
+# bg = spawned as a background/forked session (Agent tool, fork-to-background),
+# fg = a normal foreground terminal session.
+kind="fg"
+if [ -f "$transcript_path" ] && grep -qm1 '"sessionKind":"bg"' "$transcript_path" 2>/dev/null; then
+  kind="bg"
+fi
+
+# For bg sessions, find the parent session so the dropdown can nest it
+# instead of showing a flat, unexplained duplicate row. A forked/background
+# process's own command line includes --resume <parent-transcript>.jsonl —
+# no separate API needed, just read our own ancestry.
+parent_session_id=""
+if [ "$kind" = "bg" ]; then
+  pid=$PPID
+  for _ in 1 2 3; do
+    [ -z "$pid" ] && break
+    cmd=$(ps -o command= -p "$pid" 2>/dev/null)
+    resume_path=$(printf '%s' "$cmd" | grep -oE -- '--resume [^ ]+' | awk '{print $2}')
+    if [[ "$resume_path" == *.jsonl ]]; then
+      parent_session_id=$(basename "$resume_path" .jsonl)
+      break
+    fi
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+  done
+fi
+
 case "$event" in
   UserPromptSubmit)  status="working" ;;
   Stop)              status="idle" ;;
@@ -65,6 +91,11 @@ esac
 # Capture the terminal location so the dashboard/notification can jump to it.
 # Only valid because the hook runs inside the session's own process.
 wezterm_pane="${WEZTERM_PANE:-}"
+iterm_session_id="${ITERM_SESSION_ID:-}"
+# Every terminal app (iTerm2, Terminal, VS Code, Cursor, Warp, ...) sets its
+# own bundle id here in any shell it spawns. Even without a precise
+# tab/session id, this tells us which app to activate as a fallback.
+term_bundle_id="${__CFBundleIdentifier:-}"
 tmux_socket=""
 tmux_sess=""
 tmux_win_id=""
@@ -82,11 +113,14 @@ fi
 
 # Preserve previously captured pane info when this event lacks it.
 if [ -f "$state_file" ]; then
-  [ -z "$wezterm_pane" ]  && wezterm_pane=$(jq -r  '.wezterm_pane  // ""' "$state_file" 2>/dev/null)
+  [ -z "$wezterm_pane" ]     && wezterm_pane=$(jq -r     '.wezterm_pane     // ""' "$state_file" 2>/dev/null)
+  [ -z "$iterm_session_id" ] && iterm_session_id=$(jq -r '.iterm_session_id // ""' "$state_file" 2>/dev/null)
+  [ -z "$term_bundle_id" ]   && term_bundle_id=$(jq -r   '.term_bundle_id   // ""' "$state_file" 2>/dev/null)
   [ -z "$tmux_socket" ]   && tmux_socket=$(jq -r   '.tmux_socket   // ""' "$state_file" 2>/dev/null)
   [ -z "$tmux_sess" ]     && tmux_sess=$(jq -r     '.tmux_sess     // ""' "$state_file" 2>/dev/null)
   [ -z "$tmux_win_id" ]   && tmux_win_id=$(jq -r   '.tmux_win_id   // ""' "$state_file" 2>/dev/null)
   [ -z "$tmux_pane_id" ]  && tmux_pane_id=$(jq -r  '.tmux_pane_id  // ""' "$state_file" 2>/dev/null)
+  [ -z "$parent_session_id" ] && parent_session_id=$(jq -r '.parent_session_id // ""' "$state_file" 2>/dev/null)
 fi
 
 ts=$(date +%s)
@@ -101,10 +135,14 @@ jq -n \
   --arg event "$event" \
   --argjson ts "$ts" \
   --arg wezterm_pane "$wezterm_pane" \
+  --arg iterm_session_id "$iterm_session_id" \
+  --arg term_bundle_id "$term_bundle_id" \
   --arg tmux_socket "$tmux_socket" \
   --arg tmux_sess "$tmux_sess" \
   --arg tmux_win_id "$tmux_win_id" \
   --arg tmux_pane_id "$tmux_pane_id" \
+  --arg kind "$kind" \
+  --arg parent_session_id "$parent_session_id" \
   '{
     session_id: $session_id,
     cwd: $cwd,
@@ -114,10 +152,14 @@ jq -n \
     last_event: $event,
     last_event_ts: $ts,
     wezterm_pane: $wezterm_pane,
+    iterm_session_id: $iterm_session_id,
+    term_bundle_id: $term_bundle_id,
     tmux_socket: $tmux_socket,
     tmux_sess: $tmux_sess,
     tmux_win_id: $tmux_win_id,
-    tmux_pane_id: $tmux_pane_id
+    tmux_pane_id: $tmux_pane_id,
+    kind: $kind,
+    parent_session_id: $parent_session_id
   }' > "$tmp" && mv "$tmp" "$state_file"
 
 # Nudge SwiftBar to refresh now (on top of its 30s polling).

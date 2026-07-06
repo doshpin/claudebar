@@ -49,6 +49,25 @@ fi
 WEZTERM_BIN=$(command -v wezterm)
 TMUX_BIN=$(command -v tmux)
 
+# Pin `wezterm cli` to the running GUI's socket. SwiftBar inherits a stale
+# WEZTERM_UNIX_SOCKET from whatever WezTerm launched it — pointing at a GUI
+# that has since exited. `wezterm cli` against that dead socket spends ~5s
+# trying to spawn a server before giving up, which (×2 calls) is the ~10s
+# focus delay. If the inherited socket is missing or its owning process is
+# dead, repoint to the OLDEST live gui-sock: the long-lived GUI, never a
+# transient instance a prior cli call just spawned (those sockets are newest).
+if [ -n "$WEZTERM_BIN" ] && { [ -z "$WEZTERM_UNIX_SOCKET" ] \
+     || [ ! -S "$WEZTERM_UNIX_SOCKET" ] \
+     || ! kill -0 "${WEZTERM_UNIX_SOCKET##*-}" 2>/dev/null; }; then
+  unset WEZTERM_UNIX_SOCKET
+  for sock in "$HOME/.local/share/wezterm/gui-sock-"*; do
+    [ -S "$sock" ] || continue
+    kill -0 "${sock##*-}" 2>/dev/null || continue
+    { [ -z "$WEZTERM_UNIX_SOCKET" ] || [ "$sock" -ot "$WEZTERM_UNIX_SOCKET" ]; } \
+      && export WEZTERM_UNIX_SOCKET="$sock"
+  done
+fi
+
 if [ -n "$iterm_session_id" ]; then
   /usr/bin/osascript << EOF 2>/dev/null
     tell application "iTerm2"

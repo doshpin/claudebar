@@ -8,12 +8,10 @@
 # Notification title = the session's title (your /rename, else Claude's
 # auto-generated title, else the folder name).
 #
-# ponytail: no click-to-focus here — macOS silently ignores click actions
-# from unsigned CLI tools like terminal-notifier (confirmed empirically:
-# -execute never fires), and there's no fix short of a signed/notarized
-# app. Click-to-focus DOES work from the SwiftBar dropdown (see
-# focus-agent.sh) since that's SwiftBar's own click handling, not
-# terminal-notifier's.
+# Click-to-focus: terminal-notifier -execute runs focus-agent.sh when you
+# click the banner, jumping to the session's tab/pane (same logic the
+# SwiftBar dropdown uses). Only the terminal-notifier path supports this;
+# the osascript fallback below can't run a command on click.
 
 input=$(cat 2>/dev/null)
 cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
@@ -54,8 +52,10 @@ if command -v terminal-notifier >/dev/null 2>&1; then
   # notifier 2.0.0 uses the deprecated NSUserNotification API, which Apple
   # (Big Sur+) stopped honoring custom icons for on unsigned CLI tools.
   # No known fix short of a signed app bundle; not worth chasing further.
+  execute_args=()
+  [ -n "$session_id" ] && execute_args=(-execute "$HOME/.claude/hooks/focus-agent.sh '$session_id'")
   terminal-notifier -title "$title" -message "$message_safe" -sound "$sound" \
-    >/dev/null 2>&1
+    "${execute_args[@]}" >/dev/null 2>&1
 else
   # Fallback: no click-to-focus, but you still get the notification.
   osascript -e "display notification \"$message_safe\" with title \"$title\" sound name \"$sound\"" >/dev/null 2>&1

@@ -15,12 +15,15 @@ touch "$dismissed_file"
 # `claude agents --json --all` is Claude Code's own authoritative session
 # list — the exact same data backing the desktop app's agent view. Its
 # entries come in two kinds: "background" (a dispatched/forked agent-view
-# session — what the desktop app's Needs input / Working / Completed
-# groups show) and "interactive" (a plain terminal tab running claude, which
-# the desktop app's agent view does NOT list as a session at all). Matching
-# the desktop app 1:1 means showing only "background" here too — otherwise
-# every idle terminal tab you forgot about shows up as a phantom "session".
-agents_json=$(claude agents --json --all 2>/dev/null | jq -c '[.[] | select(.kind=="background")]')
+# session — what the desktop app's Needs input / Working / Completed groups
+# show) and "interactive" (a plain terminal tab running claude, e.g. a
+# WezTerm+tmux pane). The desktop app's agent view lists only background,
+# but claudebar's whole point is watching your own foreground terminal
+# sessions too (that's why the hooks capture WezTerm/tmux pane info), so we
+# keep both. Background carries an API state; interactive doesn't — we fill
+# its status from the hook-written state file below.
+agents_json=$(claude agents --json --all 2>/dev/null \
+  | jq -c '[.[] | select(.kind=="background" or .kind=="interactive")]')
 [ -z "$agents_json" ] && agents_json="[]"
 
 is_dismissed() { grep -qF "$(printf '%s\t' "$1")" "$dismissed_file" 2>/dev/null; }
@@ -77,7 +80,7 @@ entries=()
 # delimiter instead of preserved as an empty field — silently shifting
 # every later column left by one. Force every field non-empty with a "-"
 # sentinel so no column is ever truly blank, then strip the sentinel back.
-while IFS=$'\t' read -r sid name cwd pid state id; do
+while IFS=$'\t' read -r sid name cwd pid state id kind; do
   [ -z "$sid" ] && continue
   is_dismissed "$sid" && continue
   [ "$pid" = "-" ] && pid=""
@@ -87,13 +90,24 @@ while IFS=$'\t' read -r sid name cwd pid state id; do
     working) status="working" ;;
     *)       status="completed" ;;
   esac
+  # Interactive (foreground) sessions carry no API state — it's always null,
+  # which maps to "completed" above. Use the accurate working/idle/
+  # needs-attention our own hooks recorded for this session instead, so a
+  # busy or input-waiting foreground pane isn't misfiled as Completed.
+  if [ "$kind" = "interactive" ] && [ -f "$state_dir/$sid.json" ]; then
+    case "$(jq -r '.status // ""' "$state_dir/$sid.json" 2>/dev/null)" in
+      needs-attention) status="needs-attention" ;;
+      working)         status="working" ;;
+      idle)            status="completed" ;;
+    esac
+  fi
   if [ "$name" = "$id" ]; then
     resolved=$(resolve_title "$sid" "$cwd")
     [ -n "$resolved" ] && name="$resolved"
   fi
   name="${name//|/-}"
   entries+=("$status|$name|$sid|$cwd|$pid")
-done < <(printf '%s' "$agents_json" | jq -r '.[] | [.sessionId, .name, .cwd, (.pid // "-" | tostring), (.state // "done"), (.id // "-")] | @tsv')
+done < <(printf '%s' "$agents_json" | jq -r '.[] | [.sessionId, .name, .cwd, (.pid // "-" | tostring), (.state // "done"), (.id // "-"), .kind] | @tsv')
 
 attn=0; work=0; done_n=0
 for e in "${entries[@]}"; do

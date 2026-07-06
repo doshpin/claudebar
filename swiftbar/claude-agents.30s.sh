@@ -74,6 +74,22 @@ resolve_title() {
   echo "$title"
 }
 
+# Sub-agents (background/forked sessions) aren't shown as their own rows —
+# only the main (interactive) session is. Instead, a running sub-agent rolls
+# its "busy" up onto its parent: while any of a session's sub-agents is still
+# working/blocked, the parent stays yellow and never reports "turn complete",
+# even after its own Stop hook fired. parent_session_id is captured by the
+# update-state hook (process ancestry via --resume); read it from the child's
+# state file. bash 3.2 has no assoc arrays, so collect a newline list + grep.
+active_parents=""
+while IFS=$'\t' read -r sid state kind; do
+  [ "$kind" = "background" ] || continue
+  case "$state" in working|blocked) ;; *) continue ;; esac
+  psid=$(jq -r '.parent_session_id // ""' "$state_dir/$sid.json" 2>/dev/null)
+  [ -n "$psid" ] && active_parents="${active_parents}${psid}
+"
+done < <(printf '%s' "$agents_json" | jq -r '.[] | [.sessionId, (.state // "done"), .kind] | @tsv')
+
 entries=()
 # Tab is "IFS whitespace" to bash's `read`, so consecutive tabs (an empty
 # field, e.g. .pid missing on a respawned session) get squeezed into one
@@ -82,6 +98,8 @@ entries=()
 # sentinel so no column is ever truly blank, then strip the sentinel back.
 while IFS=$'\t' read -r sid name cwd pid state id kind; do
   [ -z "$sid" ] && continue
+  # Hide sub-agents; only the main (interactive) session gets a row.
+  [ "$kind" = "background" ] && continue
   is_dismissed "$sid" && continue
   [ "$pid" = "-" ] && pid=""
   [ "$id" = "-" ] && id=""
@@ -100,6 +118,10 @@ while IFS=$'\t' read -r sid name cwd pid state id kind; do
       working)         status="working" ;;
       idle)            status="completed" ;;
     esac
+  fi
+  # A running sub-agent keeps its parent yellow, overriding an idle Stop.
+  if printf '%s' "$active_parents" | grep -qxF "$sid"; then
+    status="working"
   fi
   if [ "$name" = "$id" ]; then
     resolved=$(resolve_title "$sid" "$cwd")

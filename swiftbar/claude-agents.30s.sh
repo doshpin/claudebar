@@ -150,10 +150,16 @@ while IFS=$'\t' read -r sid name cwd pid state id kind; do
     [ -n "$resolved" ] && name="$resolved"
   fi
   name="${name//|/-}"
-  # Recency key = transcript mtime (last activity ≈ when it completed), so
-  # each group can list newest first — the session you just finished on top.
-  tp="$HOME/.claude/projects/$(printf '%s' "$cwd" | sed 's|/|-|g')/$sid.jsonl"
-  ts=$(stat -f %m "$tp" 2>/dev/null || echo 0)
+  # Finish time = later of the hook's last_event_ts (when Stop fired) and the
+  # transcript mtime (last activity). The hook value is the real turn-finish
+  # moment; the mtime covers stale-override completions and sessions with no
+  # state file. Groups sort by this newest-first, and it's shown in brackets.
+  sf="$state_dir/$sid.json"
+  ev_ts=$(jq -r '.last_event_ts // 0' "$sf" 2>/dev/null)
+  tp=$(jq -r '.transcript_path // ""' "$sf" 2>/dev/null)
+  [ -z "$tp" ] && tp="$HOME/.claude/projects/$(printf '%s' "$cwd" | sed 's|/|-|g')/$sid.jsonl"
+  t_m=$(stat -f %m "$tp" 2>/dev/null || echo 0)
+  ts=$ev_ts; [ "${t_m:-0}" -gt "${ts:-0}" ] 2>/dev/null && ts=$t_m
   entries+=("$status|$name|$sid|$cwd|$pid|$ts")
 done < <(printf '%s' "$agents_json" | jq -r '.[] | [.sessionId, .name, .cwd, (.pid // "-" | tostring), (.state // "done"), (.id // "-"), .kind] | @tsv')
 
@@ -224,10 +230,11 @@ status_icon() {
 }
 
 render_row() {
-  local status="$1" name="$2" sid="$3" cwd="$4"
-  local b64_icon
+  local status="$1" name="$2" sid="$3" cwd="$4" ts="$5"
+  local b64_icon when=""
   b64_icon=$(b64 "$(status_icon "$status")")
-  echo "${name} | image=$b64_icon bash='$HOME/.claude/hooks/focus-agent.sh' param1='$sid' terminal=false"
+  [ "${ts:-0}" -gt 0 ] 2>/dev/null && when=" ($(date -r "$ts" '+%H:%M'))"
+  echo "${name}${when} | image=$b64_icon bash='$HOME/.claude/hooks/focus-agent.sh' param1='$sid' terminal=false"
   [ -n "$cwd" ] && echo "-- $cwd | size=10 color=#888888 bash='/usr/bin/open' param1='$cwd' terminal=false"
   echo "-- Dismiss | size=10 color=#c0392b bash='$HOME/.claude/hooks/dismiss-agent.sh' param1='$sid' terminal=false refresh=true"
 }
@@ -242,9 +249,9 @@ print_group() {
   done | sort -rn -k1,1 | cut -f2-)
   [ -z "$sorted" ] && return 1
   echo "$heading | size=11 color=#888888"
-  while IFS='|' read -r status name sid cwd _pid _ts; do
+  while IFS='|' read -r status name sid cwd _pid ts; do
     [ -z "$status" ] && continue
-    render_row "$status" "$name" "$sid" "$cwd"
+    render_row "$status" "$name" "$sid" "$cwd" "$ts"
   done <<< "$sorted"
   return 0
 }

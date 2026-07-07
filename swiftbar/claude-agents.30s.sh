@@ -150,7 +150,11 @@ while IFS=$'\t' read -r sid name cwd pid state id kind; do
     [ -n "$resolved" ] && name="$resolved"
   fi
   name="${name//|/-}"
-  entries+=("$status|$name|$sid|$cwd|$pid")
+  # Recency key = transcript mtime (last activity ≈ when it completed), so
+  # each group can list newest first — the session you just finished on top.
+  tp="$HOME/.claude/projects/$(printf '%s' "$cwd" | sed 's|/|-|g')/$sid.jsonl"
+  ts=$(stat -f %m "$tp" 2>/dev/null || echo 0)
+  entries+=("$status|$name|$sid|$cwd|$pid|$ts")
 done < <(printf '%s' "$agents_json" | jq -r '.[] | [.sessionId, .name, .cwd, (.pid // "-" | tostring), (.state // "done"), (.id // "-"), .kind] | @tsv')
 
 attn=0; work=0; done_n=0
@@ -229,14 +233,20 @@ render_row() {
 }
 
 print_group() {
-  local target="$1" heading="$2" printed=0
-  for e in "${entries[@]}"; do
-    IFS='|' read -r status name sid cwd _pid <<< "$e"
-    [ "$status" = "$target" ] || continue
-    if [ "$printed" = 0 ]; then echo "$heading | size=11 color=#888888"; printed=1; fi
+  local target="$1" heading="$2"
+  # Sort this group's rows by recency key (last field), newest first.
+  local sorted
+  sorted=$(for e in "${entries[@]}"; do
+    [ "${e%%|*}" = "$target" ] || continue
+    printf '%s\t%s\n' "${e##*|}" "$e"
+  done | sort -rn -k1,1 | cut -f2-)
+  [ -z "$sorted" ] && return 1
+  echo "$heading | size=11 color=#888888"
+  while IFS='|' read -r status name sid cwd _pid _ts; do
+    [ -z "$status" ] && continue
     render_row "$status" "$name" "$sid" "$cwd"
-  done
-  [ "$printed" = 1 ]
+  done <<< "$sorted"
+  return 0
 }
 
 has_status() {

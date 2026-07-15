@@ -14,7 +14,7 @@ case "$1" in
     ;;
   --all)
     claude agents --json --all 2>/dev/null \
-      | jq -r '.[] | select(.kind=="background") | [.sessionId, (.state // "done")] | @tsv' \
+      | jq -r '.[] | select(.kind=="interactive") | [.sessionId, (.state // "done")] | @tsv' \
       > "$dismissed_file"
     ;;
   ?*)

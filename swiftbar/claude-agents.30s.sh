@@ -5,7 +5,7 @@
 # <xbar.desc>Menu-bar dashboard for every running Claude Code agent-view session.</xbar.desc>
 # Refreshed every 30s as a fallback; hooks trigger immediate refresh via swiftbar:// URL.
 
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 state_dir="$HOME/.claude/state/agents"
 dismissed_file="$HOME/.claude/state/claudebar-dismissed"
@@ -58,7 +58,7 @@ mv "$dismissed_file.tmp" "$dismissed_file"
 resolve_title() {
   local sid="$1" cwd="$2"
   local sanitized transcript_path title=""
-  sanitized=$(printf '%s' "$cwd" | sed 's|/|-|g')
+  sanitized=$(printf '%s' "$cwd" | sed 's|[/.]|-|g')
   transcript_path="$HOME/.claude/projects/${sanitized}/${sid}.jsonl"
   if [ -f "$transcript_path" ]; then
     local reversed line
@@ -74,6 +74,22 @@ resolve_title() {
   echo "$title"
 }
 
+# Sub-agents (background/forked sessions) aren't shown as their own rows —
+# only the main (interactive) session is. Instead, a running sub-agent rolls
+# its "busy" up onto its parent: while any of a session's sub-agents is still
+# working/blocked, the parent stays yellow and never reports "turn complete",
+# even after its own Stop hook fired. parent_session_id is captured by the
+# update-state hook (process ancestry via --resume); read it from the child's
+# state file. bash 3.2 has no assoc arrays, so collect a newline list + grep.
+active_parents=""
+while IFS=$'\t' read -r sid state kind; do
+  [ "$kind" = "background" ] || continue
+  case "$state" in working|blocked) ;; *) continue ;; esac
+  psid=$(jq -r '.parent_session_id // ""' "$state_dir/$sid.json" 2>/dev/null)
+  [ -n "$psid" ] && active_parents="${active_parents}${psid}
+"
+done < <(printf '%s' "$agents_json" | jq -r '.[] | [.sessionId, (.state // "done"), .kind] | @tsv')
+
 entries=()
 # Tab is "IFS whitespace" to bash's `read`, so consecutive tabs (an empty
 # field, e.g. .pid missing on a respawned session) get squeezed into one
@@ -82,6 +98,8 @@ entries=()
 # sentinel so no column is ever truly blank, then strip the sentinel back.
 while IFS=$'\t' read -r sid name cwd pid state id kind; do
   [ -z "$sid" ] && continue
+  # Hide sub-agents; only the main (interactive) session gets a row.
+  [ "$kind" = "background" ] && continue
   is_dismissed "$sid" && continue
   [ "$pid" = "-" ] && pid=""
   [ "$id" = "-" ] && id=""
@@ -95,18 +113,54 @@ while IFS=$'\t' read -r sid name cwd pid state id kind; do
   # needs-attention our own hooks recorded for this session instead, so a
   # busy or input-waiting foreground pane isn't misfiled as Completed.
   if [ "$kind" = "interactive" ] && [ -f "$state_dir/$sid.json" ]; then
-    case "$(jq -r '.status // ""' "$state_dir/$sid.json" 2>/dev/null)" in
+    sf="$state_dir/$sid.json"
+    case "$(jq -r '.status // ""' "$sf" 2>/dev/null)" in
       needs-attention) status="needs-attention" ;;
       working)         status="working" ;;
       idle)            status="completed" ;;
     esac
+    # Stale-state override. The hook only records working/needs-attention on
+    # the events that fire; some interactions fire none that reset it — Esc
+    # interrupting a turn (no Stop), or answering an in-place question/
+    # permission (no UserPromptSubmit) — so the color sticks forever. The
+    # transcript is ground truth: if it was modified AFTER the last recorded
+    # event (newer mtime) and has since gone quiet, the session already moved
+    # on — show it idle instead of a stale yellow/red. Both conditions matter:
+    # "newer than state" keeps a genuinely-unanswered prompt red; "quiet"
+    # avoids flipping a live, mid-turn session green during a long tool call.
+    if [ "$status" = "working" ] || [ "$status" = "needs-attention" ]; then
+      tp=$(jq -r '.transcript_path // ""' "$sf" 2>/dev/null)
+      if [ -f "$tp" ]; then
+        s_m=$(stat -f %m "$sf" 2>/dev/null)
+        t_m=$(stat -f %m "$tp" 2>/dev/null)
+        now=$(date +%s)
+        if [ -n "$s_m" ] && [ -n "$t_m" ] \
+           && [ "$t_m" -gt "$s_m" ] && [ $((now - t_m)) -gt 60 ]; then
+          status="completed"
+        fi
+      fi
+    fi
+  fi
+  # A running sub-agent keeps its parent yellow, overriding an idle Stop.
+  if printf '%s' "$active_parents" | grep -qxF "$sid"; then
+    status="working"
   fi
   if [ "$name" = "$id" ]; then
     resolved=$(resolve_title "$sid" "$cwd")
     [ -n "$resolved" ] && name="$resolved"
   fi
   name="${name//|/-}"
-  entries+=("$status|$name|$sid|$cwd|$pid")
+  # Finish time = later of the hook's last_event_ts (when Stop fired) and the
+  # transcript mtime (last activity). The hook value is the real turn-finish
+  # moment; the mtime covers stale-override completions and sessions with no
+  # state file. Groups sort by this newest-first, and it's shown in brackets.
+  sf="$state_dir/$sid.json"
+  ev_ts=$(jq -r '.last_event_ts // 0' "$sf" 2>/dev/null)
+  tp=$(jq -r '.transcript_path // ""' "$sf" 2>/dev/null)
+  [ -z "$tp" ] && tp="$HOME/.claude/projects/$(printf '%s' "$cwd" | sed 's|[/.]|-|g')/$sid.jsonl"
+  t_m=$(stat -f %m "$tp" 2>/dev/null || echo 0)
+  ts=$ev_ts; [ "${t_m:-0}" -gt "${ts:-0}" ] 2>/dev/null && ts=$t_m
+  entries+=("$status|$name|$sid|$cwd|$pid|$ts")
 done < <(printf '%s' "$agents_json" | jq -r '.[] | [.sessionId, .name, .cwd, (.pid // "-" | tostring), (.state // "done"), (.id // "-"), .kind] | @tsv')
 
 attn=0; work=0; done_n=0
@@ -136,13 +190,50 @@ ansi_bold() {
   printf '\033[1;%dm%s\033[0m' "$code" "$text"
 }
 
+# Account-wide 5-hour usage — same number for every session, computed once
+# here (not per-session) and shown both in the menu bar title and, more
+# fully, in the dropdown below. Only present once
+# hooks/capture-statusline.sh has been wired up (see its header comment).
+# Settings > 5h usage controls whether/how it's shown: full (with reset
+# countdown), compact (percent only), or hidden entirely.
+fiveh_display=$(cat "$HOME/.claude/state/claudebar-fiveh-display" 2>/dev/null)
+[ -z "$fiveh_display" ] && fiveh_display="full"
+
+fiveh_file="$HOME/.claude/state/claudebar-fiveh.json"
+fiveh_title="" fiveh_line=""
+if [ "$fiveh_display" != "hidden" ] && [ -f "$fiveh_file" ]; then
+  fiveh_pct=$(jq -r '.used_percentage // empty' "$fiveh_file" 2>/dev/null)
+  fiveh_resets=$(jq -r '.resets_at // empty' "$fiveh_file" 2>/dev/null)
+  if [ -n "$fiveh_pct" ]; then
+    fiveh_hex="#30d158" fiveh_ansi=92
+    p="${fiveh_pct%.*}"
+    if [ "$p" -ge 80 ]; then fiveh_hex="#ff453a"; fiveh_ansi=91
+    elif [ "$p" -ge 65 ]; then fiveh_hex="#ff9f0a"; fiveh_ansi=93
+    elif [ "$p" -ge 50 ]; then fiveh_hex="#ffd60a"; fiveh_ansi=93
+    fi
+    fiveh_pct_fmt="$(printf '%.0f' "$fiveh_pct")"
+    fiveh_remain=""
+    if [ "$fiveh_display" = "full" ] && [ -n "$fiveh_resets" ]; then
+      remain_min=$(( (${fiveh_resets%.*} - $(date +%s)) / 60 ))
+      [ "$remain_min" -lt 0 ] && remain_min=0
+      fiveh_remain=" (${remain_min}m)"
+    fi
+    fiveh_title="$(ansi_bold "$fiveh_ansi" "⏳${fiveh_pct_fmt}%${fiveh_remain}")"
+    fiveh_line="⏳ ${fiveh_pct_fmt}%${fiveh_remain}"
+  fi
+fi
+
 # Menu bar title — one Claude icon tinted to the dominant status, plus a
 # per-status count breakdown, each number bold and colored to match its own
-# circle (not just one line-wide color). Empty state: plain orange icon,
-# no counts.
+# circle (not just one line-wide color), plus the 5-hour usage if known.
+# Empty state: plain orange icon, no counts.
 if [ ${#entries[@]} -eq 0 ]; then
   b64_dom=$(b64 "$tint_dir/claude-orange.png")
-  [ -n "$b64_dom" ] && echo " | image=$b64_dom" || echo "🤖"
+  if [ -n "$b64_dom" ]; then
+    echo "$fiveh_title | ansi=true image=$b64_dom"
+  else
+    echo "🤖 $fiveh_title | ansi=true"
+  fi
 else
   if [ "$attn" -gt 0 ]; then dominant="$tint_dir/claude-red.png"
   elif [ "$work" -gt 0 ]; then dominant="$tint_dir/claude-yellow.png"
@@ -157,6 +248,7 @@ else
   [ "$attn" -gt 0 ] && parts+=("$(ansi_bold 91 "●") $(ansi_bold 91 "$attn")")
   [ "$work" -gt 0 ] && parts+=("$(ansi_bold 93 "●") $(ansi_bold 93 "$work")")
   [ "$done_n" -gt 0 ] && parts+=("$(ansi_bold 92 "●") $(ansi_bold 92 "$done_n")")
+  [ -n "$fiveh_title" ] && parts+=("$fiveh_title")
   b64_dom=$(b64 "$dominant")
   if [ -n "$b64_dom" ]; then
     echo "${parts[*]} | ansi=true image=$b64_dom"
@@ -167,6 +259,15 @@ fi
 
 echo "---"
 
+# The fuller 5h line (with reset countdown) belongs only in the dropdown —
+# anything printed before the FIRST "---" is treated as a menu bar title
+# line in SwiftBar/xbar and cycles with the icon+dots line above, which is
+# not what we want here.
+if [ -n "$fiveh_line" ]; then
+  echo "$fiveh_line | size=12 color=$fiveh_hex"
+  echo "---"
+fi
+
 status_icon() {
   case "$1" in
     needs-attention) echo "$tint_dir/claude-red.png" ;;
@@ -175,24 +276,110 @@ status_icon() {
   esac
 }
 
+# Per-session detail lines — the exact numbers your terminal statusLine
+# shows (effort / context% / cost / duration / lines changed), not a
+# reconstruction. Only present if hooks/capture-statusline.sh has been
+# wired into the user's own statusline script (see its header comment);
+# a no-op otherwise, so no extra lines appear.
+fmt_duration() {
+  local ms="$1" s m
+  s=$(( ${ms%.*} / 1000 ))
+  m=$(( s / 60 ))
+  if [ "$m" -ge 60 ]; then printf '%sh%sm' "$((m / 60))" "$((m % 60))"
+  else printf '%sm%ss' "$m" "$((s % 60))"
+  fi
+}
+
+fmt_tok() {
+  local n="${1%.*}"
+  if [ "$n" -ge 1000000 ]; then printf '%sm' "$((n / 1000000))"
+  elif [ "$n" -ge 1000 ]; then printf '%sk' "$((n / 1000))"
+  else printf '%s' "$n"
+  fi
+}
+
+# Same context-%  thresholds as a typical statusline: cools from red (nearly
+# full) down to green (plenty of room left).
+ctx_color() {
+  local p="${1%.*}"
+  if [ "$p" -ge 70 ]; then echo "#ff453a"
+  elif [ "$p" -ge 50 ]; then echo "#ff9f0a"
+  elif [ "$p" -ge 35 ]; then echo "#ffd60a"
+  else echo "#30d158"
+  fi
+}
+
+# Repo + branch, read straight from cwd's own git checkout — always
+# available regardless of whether capture-statusline.sh is wired up.
+repo_branch_line() {
+  local cwd="$1" repo branch
+  [ -d "$cwd" ] || return
+  repo=$(basename -s .git "$(git -C "$cwd" remote get-url origin 2>/dev/null)" 2>/dev/null)
+  [ -z "$repo" ] && repo=$(basename "$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
+  branch=$(git -C "$cwd" branch --show-current 2>/dev/null)
+  [ -z "$repo" ] && [ -z "$branch" ] && return
+  printf '%s\t%s' "$repo" "$branch"
+}
+
+render_detail_lines() {
+  local sid="$1" cwd="$2" f="$state_dir/$sid.json"
+  [ -f "$f" ] || return
+  local model effort ctx tok_in tok_out cost dur lines_added lines_removed repo branch
+  model=$(jq -r '.model // empty' "$f" 2>/dev/null)
+  effort=$(jq -r '.effort // empty' "$f" 2>/dev/null)
+  ctx=$(jq -r '.context_pct // empty' "$f" 2>/dev/null)
+  tok_in=$(jq -r '.tok_in // empty' "$f" 2>/dev/null)
+  tok_out=$(jq -r '.tok_out // empty' "$f" 2>/dev/null)
+  cost=$(jq -r '.cost_usd // empty' "$f" 2>/dev/null)
+  dur=$(jq -r '.duration_ms // empty' "$f" 2>/dev/null)
+  lines_added=$(jq -r '.lines_added // empty' "$f" 2>/dev/null)
+  lines_removed=$(jq -r '.lines_removed // empty' "$f" 2>/dev/null)
+  IFS=$'\t' read -r repo branch <<< "$(repo_branch_line "$cwd")"
+
+  if [ -n "$model" ]; then
+    local model_line="🤖 $model"
+    [ -n "$effort" ] && model_line="$model_line - $effort"
+    echo "-- $model_line | size=12 color=#5ac8fa"
+  fi
+  [ -n "$ctx" ] && echo "-- 🧠 $(printf '%.0f' "$ctx")% ctx | size=12 color=$(ctx_color "$ctx")"
+  if [ -n "$tok_in" ] || [ -n "$tok_out" ]; then
+    echo "-- 🔢 $(fmt_tok "${tok_in:-0}") in / $(fmt_tok "${tok_out:-0}") out | size=12 color=#e5e5e7"
+  fi
+  [ -n "$cost" ] && echo "-- 💰 \$$(printf '%.2f' "$cost") | size=12 color=#e5e5e7"
+  [ -n "$dur" ] && echo "-- ⏱️ $(fmt_duration "$dur") | size=12 color=#e5e5e7"
+  [ -n "$repo" ] && echo "-- 📦 $repo | size=12 color=#e5e5e7"
+  [ -n "$branch" ] && echo "-- 🌿 $branch | size=12 color=#e5e5e7"
+  if [ -n "$lines_added" ] || [ -n "$lines_removed" ]; then
+    echo "-- 📝 $(ansi_bold 92 "+${lines_added:-0}") $(ansi_bold 91 "-${lines_removed:-0}") | size=12 ansi=true"
+  fi
+}
+
 render_row() {
-  local status="$1" name="$2" sid="$3" cwd="$4"
-  local b64_icon
+  local status="$1" name="$2" sid="$3" cwd="$4" ts="$5"
+  local b64_icon when=""
   b64_icon=$(b64 "$(status_icon "$status")")
-  echo "${name} | image=$b64_icon bash='$HOME/.claude/hooks/focus-agent.sh' param1='$sid' terminal=false"
+  [ "${ts:-0}" -gt 0 ] 2>/dev/null && when=" ($(date -r "$ts" '+%H:%M'))"
+  echo "${name}${when} | image=$b64_icon bash='$HOME/.claude/hooks/focus-agent.sh' param1='$sid' terminal=false"
   [ -n "$cwd" ] && echo "-- $cwd | size=10 color=#888888 bash='/usr/bin/open' param1='$cwd' terminal=false"
+  render_detail_lines "$sid" "$cwd"
   echo "-- Dismiss | size=10 color=#c0392b bash='$HOME/.claude/hooks/dismiss-agent.sh' param1='$sid' terminal=false refresh=true"
 }
 
 print_group() {
-  local target="$1" heading="$2" printed=0
-  for e in "${entries[@]}"; do
-    IFS='|' read -r status name sid cwd _pid <<< "$e"
-    [ "$status" = "$target" ] || continue
-    if [ "$printed" = 0 ]; then echo "$heading | size=11 color=#888888"; printed=1; fi
-    render_row "$status" "$name" "$sid" "$cwd"
-  done
-  [ "$printed" = 1 ]
+  local target="$1" heading="$2"
+  # Sort this group's rows by recency key (last field), newest first.
+  local sorted
+  sorted=$(for e in "${entries[@]}"; do
+    [ "${e%%|*}" = "$target" ] || continue
+    printf '%s\t%s\n' "${e##*|}" "$e"
+  done | sort -rn -k1,1 | cut -f2-)
+  [ -z "$sorted" ] && return 1
+  echo "$heading | size=11 color=#888888"
+  while IFS='|' read -r status name sid cwd _pid ts; do
+    [ -z "$status" ] && continue
+    render_row "$status" "$name" "$sid" "$cwd" "$ts"
+  done <<< "$sorted"
+  return 0
 }
 
 has_status() {
@@ -224,9 +411,17 @@ echo "---"
 echo "Settings"
 current_sound=$(cat "$HOME/.claude/state/claudebar-sound" 2>/dev/null)
 [ -z "$current_sound" ] && current_sound="Glass"
-echo "-- Sound | size=11 color=#888888"
+echo "-- Sound"
 for s in Basso Blow Bottle Frog Funk Glass Hero Morse Ping Pop Purr Sosumi Submarine Tink; do
   mark=""
   [ "$s" = "$current_sound" ] && mark="✓ "
-  echo "-- ${mark}${s} | bash='$HOME/.claude/hooks/set-sound.sh' param1='$s' terminal=false refresh=true"
+  echo "---- ${mark}${s} | bash='$HOME/.claude/hooks/set-sound.sh' param1='$s' terminal=false refresh=true"
+done
+echo "-- 5h usage"
+for mode_label in "full:With minutes" "compact:Percent only" "hidden:Hide completely"; do
+  mode="${mode_label%%:*}"
+  label="${mode_label#*:}"
+  mark=""
+  [ "$mode" = "$fiveh_display" ] && mark="✓ "
+  echo "---- ${mark}${label} | bash='$HOME/.claude/hooks/set-fiveh-display.sh' param1='$mode' terminal=false refresh=true"
 done

@@ -5,7 +5,7 @@
 # <xbar.desc>Menu-bar dashboard for every running Claude Code agent-view session.</xbar.desc>
 # Refreshed every 30s as a fallback; hooks trigger immediate refresh via swiftbar:// URL.
 
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 state_dir="$HOME/.claude/state/agents"
 dismissed_file="$HOME/.claude/state/claudebar-dismissed"
@@ -15,12 +15,15 @@ touch "$dismissed_file"
 # `claude agents --json --all` is Claude Code's own authoritative session
 # list — the exact same data backing the desktop app's agent view. Its
 # entries come in two kinds: "background" (a dispatched/forked agent-view
-# session — what the desktop app's Needs input / Working / Completed
-# groups show) and "interactive" (a plain terminal tab running claude, which
-# the desktop app's agent view does NOT list as a session at all). Matching
-# the desktop app 1:1 means showing only "background" here too — otherwise
-# every idle terminal tab you forgot about shows up as a phantom "session".
-agents_json=$(claude agents --json --all 2>/dev/null | jq -c '[.[] | select(.kind=="background")]')
+# session — what the desktop app's Needs input / Working / Completed groups
+# show) and "interactive" (a plain terminal tab running claude, e.g. a
+# WezTerm+tmux pane). The desktop app's agent view lists only background,
+# but claudebar's whole point is watching your own foreground terminal
+# sessions too (that's why the hooks capture WezTerm/tmux pane info), so we
+# keep both. Background carries an API state; interactive doesn't — we fill
+# its status from the hook-written state file below.
+agents_json=$(claude agents --json --all 2>/dev/null \
+  | jq -c '[.[] | select(.kind=="background" or .kind=="interactive")]')
 [ -z "$agents_json" ] && agents_json="[]"
 
 is_dismissed() { grep -qF "$(printf '%s\t' "$1")" "$dismissed_file" 2>/dev/null; }
@@ -71,14 +74,32 @@ resolve_title() {
   echo "$title"
 }
 
+# Sub-agents (background/forked sessions) aren't shown as their own rows —
+# only the main (interactive) session is. Instead, a running sub-agent rolls
+# its "busy" up onto its parent: while any of a session's sub-agents is still
+# working/blocked, the parent stays yellow and never reports "turn complete",
+# even after its own Stop hook fired. parent_session_id is captured by the
+# update-state hook (process ancestry via --resume); read it from the child's
+# state file. bash 3.2 has no assoc arrays, so collect a newline list + grep.
+active_parents=""
+while IFS=$'\t' read -r sid state kind; do
+  [ "$kind" = "background" ] || continue
+  case "$state" in working|blocked) ;; *) continue ;; esac
+  psid=$(jq -r '.parent_session_id // ""' "$state_dir/$sid.json" 2>/dev/null)
+  [ -n "$psid" ] && active_parents="${active_parents}${psid}
+"
+done < <(printf '%s' "$agents_json" | jq -r '.[] | [.sessionId, (.state // "done"), .kind] | @tsv')
+
 entries=()
 # Tab is "IFS whitespace" to bash's `read`, so consecutive tabs (an empty
 # field, e.g. .pid missing on a respawned session) get squeezed into one
 # delimiter instead of preserved as an empty field — silently shifting
 # every later column left by one. Force every field non-empty with a "-"
 # sentinel so no column is ever truly blank, then strip the sentinel back.
-while IFS=$'\t' read -r sid name cwd pid state id; do
+while IFS=$'\t' read -r sid name cwd pid state id kind; do
   [ -z "$sid" ] && continue
+  # Hide sub-agents; only the main (interactive) session gets a row.
+  [ "$kind" = "background" ] && continue
   is_dismissed "$sid" && continue
   [ "$pid" = "-" ] && pid=""
   [ "$id" = "-" ] && id=""
@@ -87,13 +108,60 @@ while IFS=$'\t' read -r sid name cwd pid state id; do
     working) status="working" ;;
     *)       status="completed" ;;
   esac
+  # Interactive (foreground) sessions carry no API state — it's always null,
+  # which maps to "completed" above. Use the accurate working/idle/
+  # needs-attention our own hooks recorded for this session instead, so a
+  # busy or input-waiting foreground pane isn't misfiled as Completed.
+  if [ "$kind" = "interactive" ] && [ -f "$state_dir/$sid.json" ]; then
+    sf="$state_dir/$sid.json"
+    case "$(jq -r '.status // ""' "$sf" 2>/dev/null)" in
+      needs-attention) status="needs-attention" ;;
+      working)         status="working" ;;
+      idle)            status="completed" ;;
+    esac
+    # Stale-state override. The hook only records working/needs-attention on
+    # the events that fire; some interactions fire none that reset it — Esc
+    # interrupting a turn (no Stop), or answering an in-place question/
+    # permission (no UserPromptSubmit) — so the color sticks forever. The
+    # transcript is ground truth: if it was modified AFTER the last recorded
+    # event (newer mtime) and has since gone quiet, the session already moved
+    # on — show it idle instead of a stale yellow/red. Both conditions matter:
+    # "newer than state" keeps a genuinely-unanswered prompt red; "quiet"
+    # avoids flipping a live, mid-turn session green during a long tool call.
+    if [ "$status" = "working" ] || [ "$status" = "needs-attention" ]; then
+      tp=$(jq -r '.transcript_path // ""' "$sf" 2>/dev/null)
+      if [ -f "$tp" ]; then
+        s_m=$(stat -f %m "$sf" 2>/dev/null)
+        t_m=$(stat -f %m "$tp" 2>/dev/null)
+        now=$(date +%s)
+        if [ -n "$s_m" ] && [ -n "$t_m" ] \
+           && [ "$t_m" -gt "$s_m" ] && [ $((now - t_m)) -gt 60 ]; then
+          status="completed"
+        fi
+      fi
+    fi
+  fi
+  # A running sub-agent keeps its parent yellow, overriding an idle Stop.
+  if printf '%s' "$active_parents" | grep -qxF "$sid"; then
+    status="working"
+  fi
   if [ "$name" = "$id" ]; then
     resolved=$(resolve_title "$sid" "$cwd")
     [ -n "$resolved" ] && name="$resolved"
   fi
   name="${name//|/-}"
-  entries+=("$status|$name|$sid|$cwd|$pid")
-done < <(printf '%s' "$agents_json" | jq -r '.[] | [.sessionId, .name, .cwd, (.pid // "-" | tostring), (.state // "done"), (.id // "-")] | @tsv')
+  # Finish time = later of the hook's last_event_ts (when Stop fired) and the
+  # transcript mtime (last activity). The hook value is the real turn-finish
+  # moment; the mtime covers stale-override completions and sessions with no
+  # state file. Groups sort by this newest-first, and it's shown in brackets.
+  sf="$state_dir/$sid.json"
+  ev_ts=$(jq -r '.last_event_ts // 0' "$sf" 2>/dev/null)
+  tp=$(jq -r '.transcript_path // ""' "$sf" 2>/dev/null)
+  [ -z "$tp" ] && tp="$HOME/.claude/projects/$(printf '%s' "$cwd" | sed 's|[/.]|-|g')/$sid.jsonl"
+  t_m=$(stat -f %m "$tp" 2>/dev/null || echo 0)
+  ts=$ev_ts; [ "${t_m:-0}" -gt "${ts:-0}" ] 2>/dev/null && ts=$t_m
+  entries+=("$status|$name|$sid|$cwd|$pid|$ts")
+done < <(printf '%s' "$agents_json" | jq -r '.[] | [.sessionId, .name, .cwd, (.pid // "-" | tostring), (.state // "done"), (.id // "-"), .kind] | @tsv')
 
 attn=0; work=0; done_n=0
 for e in "${entries[@]}"; do
@@ -287,24 +355,31 @@ render_detail_lines() {
 }
 
 render_row() {
-  local status="$1" name="$2" sid="$3" cwd="$4"
-  local b64_icon
+  local status="$1" name="$2" sid="$3" cwd="$4" ts="$5"
+  local b64_icon when=""
   b64_icon=$(b64 "$(status_icon "$status")")
-  echo "${name} | image=$b64_icon bash='$HOME/.claude/hooks/focus-agent.sh' param1='$sid' terminal=false"
+  [ "${ts:-0}" -gt 0 ] 2>/dev/null && when=" ($(date -r "$ts" '+%H:%M'))"
+  echo "${name}${when} | image=$b64_icon bash='$HOME/.claude/hooks/focus-agent.sh' param1='$sid' terminal=false"
   [ -n "$cwd" ] && echo "-- $cwd | size=10 color=#888888 bash='/usr/bin/open' param1='$cwd' terminal=false"
   render_detail_lines "$sid" "$cwd"
   echo "-- Dismiss | size=10 color=#c0392b bash='$HOME/.claude/hooks/dismiss-agent.sh' param1='$sid' terminal=false refresh=true"
 }
 
 print_group() {
-  local target="$1" heading="$2" printed=0
-  for e in "${entries[@]}"; do
-    IFS='|' read -r status name sid cwd _pid <<< "$e"
-    [ "$status" = "$target" ] || continue
-    if [ "$printed" = 0 ]; then echo "$heading | size=11 color=#888888"; printed=1; fi
-    render_row "$status" "$name" "$sid" "$cwd"
-  done
-  [ "$printed" = 1 ]
+  local target="$1" heading="$2"
+  # Sort this group's rows by recency key (last field), newest first.
+  local sorted
+  sorted=$(for e in "${entries[@]}"; do
+    [ "${e%%|*}" = "$target" ] || continue
+    printf '%s\t%s\n' "${e##*|}" "$e"
+  done | sort -rn -k1,1 | cut -f2-)
+  [ -z "$sorted" ] && return 1
+  echo "$heading | size=11 color=#888888"
+  while IFS='|' read -r status name sid cwd _pid ts; do
+    [ -z "$status" ] && continue
+    render_row "$status" "$name" "$sid" "$cwd" "$ts"
+  done <<< "$sorted"
+  return 0
 }
 
 has_status() {
